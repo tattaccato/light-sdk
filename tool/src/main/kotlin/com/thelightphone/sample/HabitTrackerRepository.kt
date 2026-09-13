@@ -32,6 +32,13 @@ private fun currentQuarterLabel(today: LocalDate): String {
     return "${today.year}-Q$quarter"
 }
 
+/** "2026-Q3" -> "2026-Q4"; "2026-Q4" -> "2027-Q1". */
+private fun nextQuarterLabel(quarter: String): String {
+    val year = quarter.substringBefore("-Q").toInt()
+    val number = quarter.substringAfter("-Q").toInt()
+    return if (number >= 4) "${year + 1}-Q1" else "$year-Q${number + 1}"
+}
+
 private const val WEEKS_PER_QUARTER = 13
 
 enum class WeekStatus { SUCCESS, MISS, FUTURE }
@@ -52,6 +59,11 @@ data class ObjectiveQuarterProgress(
 data class QuarterOverview(
     val quarterLabel: String,
     val objectives: List<ObjectiveQuarterProgress>,
+)
+
+data class NextQuarterPrompt(
+    val quarterLabel: String,
+    val suggestedTitle: String,
 )
 
 class HabitTrackerRepository private constructor(
@@ -120,6 +132,50 @@ class HabitTrackerRepository private constructor(
         }
 
         return QuarterOverview(quarterLabel = priority.quarter, objectives = objectives)
+    }
+
+    /** Non-null once the current quarter has entered its last (13th) week - time to set up the next one. */
+    fun getNextQuarterPrompt(today: LocalDate = LocalDate.now()): NextQuarterPrompt? {
+        val priority = dao.getLatestPriority() ?: return null
+        val firstWeekStart = LocalDate.parse(priority.startDate).with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        val lastWeekStart = firstWeekStart.plusWeeks((WEEKS_PER_QUARTER - 1).toLong())
+        val currentWeekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+
+        if (currentWeekStart < lastWeekStart) return null
+        return NextQuarterPrompt(
+            quarterLabel = nextQuarterLabel(priority.quarter),
+            suggestedTitle = priority.title,
+        )
+    }
+
+    /**
+     * Starts a new quarter right after the current one ends: a new priority, with the same objectives
+     * and routines duplicated under it (fresh, with no completion history) so there's something to
+     * edit rather than build from scratch.
+     */
+    fun startNextQuarter(title: String, today: LocalDate = LocalDate.now()) {
+        val priority = dao.getLatestPriority() ?: return
+        val firstWeekStart = LocalDate.parse(priority.startDate).with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        val newStartDate = firstWeekStart.plusWeeks(WEEKS_PER_QUARTER.toLong())
+
+        val newPriorityId = dao.insertPriority(
+            PriorityEntity(
+                title = title,
+                quarter = nextQuarterLabel(priority.quarter),
+                startDate = newStartDate.toString(),
+            )
+        )
+
+        dao.getObjectivesForPriority(priority.id).forEach { objective ->
+            val newObjectiveId = dao.insertObjective(
+                ObjectiveEntity(priorityId = newPriorityId, title = objective.title, orderIndex = objective.orderIndex)
+            )
+            dao.getRoutinesForObjective(objective.id).forEach { routine ->
+                dao.insertRoutine(
+                    RoutineEntity(objectiveId = newObjectiveId, name = routine.name, weeklyTarget = routine.weeklyTarget)
+                )
+            }
+        }
     }
 
     /**

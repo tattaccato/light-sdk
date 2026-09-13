@@ -73,6 +73,7 @@ sealed class HomeMode {
         val target: Int,
         val editingRoutineId: Long? = null,
     ) : HomeMode()
+    data class EnterNextQuarterTitle(val quarterLabel: String, val suggestedTitle: String) : HomeMode()
 }
 
 class HomeScreenViewModel(
@@ -84,6 +85,9 @@ class HomeScreenViewModel(
 
     private val _quarterOverview = MutableStateFlow<QuarterOverview?>(null)
     val quarterOverview: StateFlow<QuarterOverview?> = _quarterOverview.asStateFlow()
+
+    private val _nextQuarterPrompt = MutableStateFlow<NextQuarterPrompt?>(null)
+    val nextQuarterPrompt: StateFlow<NextQuarterPrompt?> = _nextQuarterPrompt.asStateFlow()
 
     private val _mode = MutableStateFlow<HomeMode>(HomeMode.RoutineList)
     val mode: StateFlow<HomeMode> = _mode.asStateFlow()
@@ -174,10 +178,27 @@ class HomeScreenViewModel(
         _mode.value = HomeMode.RoutineList
     }
 
+    fun startCreatingNextQuarter() {
+        val prompt = _nextQuarterPrompt.value ?: return
+        _mode.value = HomeMode.EnterNextQuarterTitle(prompt.quarterLabel, prompt.suggestedTitle)
+    }
+
+    fun submitNextQuarterTitle(title: String) {
+        val current = _mode.value as? HomeMode.EnterNextQuarterTitle ?: return
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.startNextQuarter(trimmed)
+            _mode.value = HomeMode.RoutineList
+            reload()
+        }
+    }
+
     private fun reload() {
         viewModelScope.launch(Dispatchers.IO) {
             repository.seedIfEmpty()
             _overview.value = repository.getOverview()
+            _nextQuarterPrompt.value = repository.getNextQuarterPrompt()
         }
     }
 }
@@ -213,13 +234,18 @@ class HomeScreen(sealedActivity: SealedLightActivity) : LightScreen<Unit, HomeSc
                     onShowQuarterOverview = viewModel::showQuarterOverview,
                 )
 
-                is HomeMode.EditRoutineList -> EditRoutineListContent(
-                    overview = overview,
-                    onSelectRoutine = { objectiveId, objectiveTitle, routine ->
-                        viewModel.startEditRoutine(objectiveId, objectiveTitle, routine)
-                    },
-                    onExitEditMode = viewModel::cancelAdd,
-                )
+                is HomeMode.EditRoutineList -> {
+                    val nextQuarterPrompt by viewModel.nextQuarterPrompt.collectAsState()
+                    EditRoutineListContent(
+                        overview = overview,
+                        nextQuarterPrompt = nextQuarterPrompt,
+                        onSelectRoutine = { objectiveId, objectiveTitle, routine ->
+                            viewModel.startEditRoutine(objectiveId, objectiveTitle, routine)
+                        },
+                        onStartNextQuarter = viewModel::startCreatingNextQuarter,
+                        onExitEditMode = viewModel::cancelAdd,
+                    )
+                }
 
                 is HomeMode.QuarterOverview -> {
                     val quarterOverview by viewModel.quarterOverview.collectAsState()
@@ -262,6 +288,20 @@ class HomeScreen(sealedActivity: SealedLightActivity) : LightScreen<Unit, HomeSc
                     onDelete = viewModel::deleteRoutine,
                     onBack = viewModel::cancelAdd,
                 )
+
+                is HomeMode.EnterNextQuarterTitle -> {
+                    val textFieldState = rememberTextFieldState(currentMode.suggestedTitle)
+                    LightTextInputEditor(
+                        title = "Priorità di ${currentMode.quarterLabel}",
+                        state = textFieldState,
+                        keyboardOptionsFlow = keyboardOptionsFlow,
+                        onSubmit = { viewModel.submitNextQuarterTitle(it.toString()) },
+                        onBack = viewModel::cancelAdd,
+                        submitLabel = "CREA",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
     }
@@ -330,6 +370,7 @@ private fun RoutineListContent(
         } else {
             ObjectivesRoutinesColumn(
                 overview = overview,
+                quarterLabelText = overview.quarter,
                 onQuarterClick = onShowQuarterOverview,
                 onRoutineClick = { _, _, routine -> onToggleRoutine(routine.id) },
             )
@@ -340,7 +381,9 @@ private fun RoutineListContent(
 @Composable
 private fun EditRoutineListContent(
     overview: PriorityOverview?,
+    nextQuarterPrompt: NextQuarterPrompt?,
     onSelectRoutine: (objectiveId: Long, objectiveTitle: String, routine: RoutineWithProgress) -> Unit,
+    onStartNextQuarter: () -> Unit,
     onExitEditMode: () -> Unit,
 ) {
     Column(
@@ -361,8 +404,20 @@ private fun EditRoutineListContent(
                 lighten = true,
                 modifier = Modifier.padding(horizontal = 32.dp),
             )
+        } else if (nextQuarterPrompt != null) {
+            ObjectivesRoutinesColumn(
+                overview = overview,
+                quarterLabelText = "→ ${nextQuarterPrompt.quarterLabel}",
+                onQuarterClick = onStartNextQuarter,
+                onRoutineClick = onSelectRoutine,
+            )
         } else {
-            ObjectivesRoutinesColumn(overview, onQuarterClick = {}, onRoutineClick = onSelectRoutine)
+            ObjectivesRoutinesColumn(
+                overview = overview,
+                quarterLabelText = overview.quarter,
+                onQuarterClick = {},
+                onRoutineClick = onSelectRoutine,
+            )
         }
     }
 }
@@ -371,6 +426,7 @@ private fun EditRoutineListContent(
 @Composable
 private fun ObjectivesRoutinesColumn(
     overview: PriorityOverview,
+    quarterLabelText: String,
     onQuarterClick: () -> Unit,
     onRoutineClick: (objectiveId: Long, objectiveTitle: String, routine: RoutineWithProgress) -> Unit,
 ) {
@@ -381,7 +437,7 @@ private fun ObjectivesRoutinesColumn(
             modifier = Modifier.padding(bottom = 4.dp),
         )
         LightText(
-            text = overview.quarter,
+            text = quarterLabelText,
             variant = LightTextVariant.Detail,
             lighten = true,
             modifier = Modifier
